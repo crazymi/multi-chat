@@ -29,7 +29,6 @@ int talk_login(char *buf)
 	fclose(fp);
 
 	if(id == -1){
-		printf("fail to login\n");
         return -1;
 	}
     printf("Logined with: %s %d\n", buf, id);
@@ -81,7 +80,7 @@ int talk_write(int id, char *str, pthread_mutex_t *mutex)
 	// lock log
 	pthread_mutex_lock(mutex);
 	fp = fopen("talk.log", "a");
-	printf("mutex locked\n");
+	//printf("mutex locked\n");
 
 	time(&tm_time);;
 	st_time = localtime(&tm_time);
@@ -100,7 +99,7 @@ int talk_write(int id, char *str, pthread_mutex_t *mutex)
 	fclose(fp);
 	// unlock log
 	pthread_mutex_unlock(mutex);
-	printf("mutex unlocked\n");
+	//printf("mutex unlocked\n");
 
 	return line+1;
 }
@@ -172,27 +171,34 @@ int talk_unread(int id, char *str)
 	int cline = -1;
 	int cid = -1;
 
-	char **userlist[] = {"A", "B", "C", "D"};
+	char *userlist[] = {"A", "B", "C", "D"};
 
 	char buf[MAXBUF];
 	char buf2[MAXBUF];
 	char msgbuf[MAXBUF];
-	char unread[MAXBUF];
+	char unread[MAXUNREAD];
 
 	memset(buf, 0, sizeof(char)*MAXBUF);
 	memset(buf2, 0, sizeof(char)*MAXBUF);
 	memset(msgbuf, 0, sizeof(char)*MAXBUF);
-	memset(unread, 0, sizeof(char)*MAXBUF);
+	memset(unread, 0, sizeof(char)*MAXUNREAD);
 
 	// read last_line from %d.talk file
 	sprintf(buf, "%d.talk", id);
-	// if file not exists, read from first line
+
+	// file not exists means invited
 	if((fp = fopen(buf, "r")) == NULL)
-		last_line = 0;
+	{
+		return talk_len();
+	}
+	else 
+	{
+		fscanf(fp, "%d", &last_line);
+		fclose(fp);
+	}	
 
-	fscanf(fp, "%d", &last_line);
-	fclose(fp);
-
+	if(last_line == -1)
+		return 0;
 	if((fp = fopen("talk.log", "r")) == NULL)
 		return 0;
 
@@ -216,6 +222,8 @@ int talk_unread(int id, char *str)
 
 	// copy unread string to return string
 	strcpy(str, unread);
+
+	fclose(fp);
 
 	return cline;
 }

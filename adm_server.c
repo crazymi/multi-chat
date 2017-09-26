@@ -15,34 +15,17 @@
 // global variable
 int num_of_connection = 0;
 int fdlist[4];
+int invlist[4];
 int current_line = 0;
 pthread_mutex_t log_mutex;
 
-// send message to all connected client
-void *chat_all(void *str)
-{
-	char *msg = (char*)str;
-
-	pthread_t tid = pthread_self();
-	pthread_detach(tid);
-
-	printf("in chat all");
-
-	for(int i=0;i<4;i++)
-	{
-		printf("%d ", fdlist[i]);
-		if(fdlist[i] != -1)
-		{
-			write(fdlist[i], msg, sizeof(msg));
-		}
-	}
-
-	return NULL;
-}
-
 void *slave(void *vargp)
 {
+	FILE *fp;
+
 	int last_line = -1;
+	int invflag = -1;
+	int qflag = 0;
 
 	char buf[MAXBUF];
 	char msgbuf[MAXBUF];
@@ -58,21 +41,60 @@ void *slave(void *vargp)
 
 	printf("Current num: %d, serving from %d\n", argp.id, argp.fd);
 
-	// 클라이언트에 데이터 전송
+	
 	while(read(argp.fd, buf, MAXBUF) != 0)
 	{
-		printf("talk_write call\n");	
+		// invite protocol
+		if(strncmp(buf, "@invite", 7) == 0)
+		{
+			printf("invite command\n");
+
+			invflag = talk_login(buf+8);
+			// recover \n char
+			buf[strlen(buf)] = '\n';
+			if(invflag == -1)
+			{
+				printf("fail to invite: %s\n", buf+8);
+				memset(buf, 0 , sizeof(char)*MAXBUF);
+				continue;
+			}
+			else 
+			{
+				// if already exist in room
+				if(invlist[invflag] == 1)
+				{
+					memset(buf, 0 , sizeof(char)*MAXBUF);
+					continue;
+				}					
+				invlist[invflag] = 1;
+				printf("Success to invite: %s[%d]\n", buf+8, invflag);
+			}
+		}
+
+		// quit protocol
+		if(strncmp(buf, "@quit", 5) == 0)
+		{
+			printf("[%d] quit the chat room\n", argp.id);
+			invlist[argp.id] = 0;		
+			qflag = 1;	
+			break;
+		}
+
+		printf("talk_write call\n");
 		last_line = talk_write(argp.id, buf, &log_mutex);
 		
 		sprintf(msgbuf, "[%s]: %s", argp.nickname, buf);
 		printf("%d...%s", argp.fd, msgbuf);
 
+		// send message to all connected client
 		for(int i=0;i<4;i++)
 		{
 			printf("%d ", fdlist[i]);
 			if(fdlist[i] != -1)
 			{
 				write(fdlist[i], msgbuf, sizeof(msgbuf));
+				// also update last readed line
+				talk_logout(i, last_line);
 			}
 		}
 
@@ -80,14 +102,25 @@ void *slave(void *vargp)
 		memset(msgbuf, 0, sizeof(char)*MAXBUF);
 	}
 
-	// 클라이언트 소켓 종료
 	close(argp.fd);
 
 	num_of_connection--;
 	printf("%d client close\n", argp.fd);
-	if(last_line != -1)
-		talk_logout(argp.id, last_line);
 
+	// if quit delete id.talk
+	if(qflag == 1)
+	{
+		memset(buf, 0, sizeof(char)*MAXBUF);
+		sprintf(buf, "%d.talk", argp.id);
+		if((fp = fopen(buf, "r")) != NULL)
+		{
+			printf("exists\n");
+			fclose(fp);
+			remove(buf);
+		}
+	}
+
+	fdlist[argp.id] = -1;
 	return NULL;
 }
 
@@ -110,28 +143,33 @@ int main (int argc, char **argv) {
 	// initialize
 	for(int i=0;i<4;i++)
 		fdlist[i] = -1;
+	for(int i=0;i<4;i++)
+		invlist[i] = 0;
+	// at first, only A is in chat room
+	invlist[0] = 1;
+
 	pthread_mutex_init(&log_mutex, NULL);
 
 	pthread_mutex_lock(&log_mutex);
-	// 서버 소켓 생성 (TCP)
+	// define server socket	
 	sock_fd_server = socket(PF_INET, SOCK_STREAM, 0);
-
 	memset(&server_addr, 0, sizeof(struct sockaddr_in));
 
-	// TCP/IP 스택의 주소 집합으로 설정
+	// TCP/IP family
 	server_addr.sin_family = AF_INET;
-	// 어떤 클라이언트 주소도 접근할 수 있음
+	// open to any address
 	server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	// 서버의 포트를 2000번으로 설정
-	server_addr.sin_port = htons(2000);
+	// specify port number in talk.h
+	server_addr.sin_port = htons(PORT);
 
 	pthread_mutex_unlock(&log_mutex);
 
-	// 서버 소켓에 주소 할당	
+	// bind addresss to sever socket
 	if(bind(sock_fd_server, (struct sockaddr*) &server_addr, sizeof(struct sockaddr_in)) == -1){
-		// error
+		printf("unix error while binding\n");
+		return 1;
 	}
-	// 서버 대기 상태로 설정
+	// set server as listen state
 	listen(sock_fd_server, 5);
  
 	while(1){
@@ -142,34 +180,58 @@ int main (int argc, char **argv) {
 		read(sock_fd_client, buf, MAXBUF);
 		printf("[%d]Get %s\n", sock_fd_client, buf);
 		fflush(stdout);
-		// login protocol
+
+		// login parser, run at initial accept
 		if(buf[0] == 'l' && buf[1] == '*'){
+			// remove protocol chars "l*"
 			memmove(buf, buf+2, strlen(buf)-2);
 			buf[strlen(buf)-2] = '\0';
-
+			
+			// flag contains id, if login success
 			flag = talk_login(buf);
 
+			// if not in user list = wrong id
 			if(flag == -1){
 				printf("[%d]Wrong id\n", sock_fd_client);
 				write(sock_fd_client, "", MAXBUF);	
 				continue;
 			}
 
-			write(sock_fd_client, "s", MAXBUF);
+			// if not in chat room = not invited yet
+			if(invlist[flag] == 0)
+			{
+				printf("[%d]Not allowed\n", sock_fd_client);
+				write(sock_fd_client, "", MAXBUF);	
+				continue;
+			}
+
+			// if duplicate login try
+			if(fdlist[flag] != -1)
+			{
+				printf("[%d]Already logined\n", sock_fd_client);
+				write(sock_fd_client, "", MAXBUF);	
+				continue;
+			}
+
+			write(sock_fd_client, "Welcome", MAXBUF);
 		} else {
 			printf("[%d]Wrong login protocl\n", sock_fd_client);
 			write(sock_fd_client, "", MAXBUF);
 			continue;
 		}
 
-		char tmpbuf[MAXBUF];
-		memset(tmpbuf, 0, sizeof(char)*MAXBUF);
+		// get unreaded line 
+		char tmpbuf[MAXUNREAD];
+		memset(tmpbuf, 0, sizeof(char)*MAXUNREAD);
 		int ggline = talk_unread(flag, tmpbuf);
 		printf("%d's last line is %d\n", flag, ggline);
-		talk_logout(flag, ggline);
 
 		write(sock_fd_client, tmpbuf, MAXBUF);
 
+		// update last_line
+		talk_logout(flag, ggline);
+
+		// zip information of client as params
 		vargp = malloc(sizeof(arginfo));
 		vargp->fd = sock_fd_client;
 		vargp->port = 0;
@@ -179,14 +241,15 @@ int main (int argc, char **argv) {
 
 		num_of_connection++;
 
+		// fdlist contains sock_number of each id
 		fdlist[flag] = sock_fd_client;
-
+		// note that, slave thread is detached
 		pthread_create(&tid, NULL, slave, vargp);
 
 		//pthread_join(tid, NULL);
 	}
 	
-	// 서버 소켓 종료
+	// close socket
 	close(sock_fd_server);
 	return 0;
 }
